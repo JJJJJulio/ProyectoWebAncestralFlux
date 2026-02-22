@@ -5,6 +5,7 @@ Experiencia web generativa basada en Canvas 2D, orientada a iteración visual m�
 ## Estado actual
 - Bloque 1: motor visual estable (RAF + `update/render`, HiDPI, resize con debounce).
 - Bloque 2: Symbol Loader con rotación por pasos, rotación suave opcional y navegación mínima.
+- Bloques 3-4: máscara alpha + partículas orgánicas adaptativas (sin UI arcade).
 
 ## Asset activo
 - Ruta: `./assets/symbols/symbol-01.png`
@@ -14,6 +15,8 @@ Experiencia web generativa basada en Canvas 2D, orientada a iteración visual m�
 - `ArrowRight`: símbolo siguiente.
 - `R`: rotación por paso de 90°.
 - `Shift + R`: activar/desactivar rotación suave automática.
+- `P`: activar/desactivar partículas.
+- `D`: debug de máscara/puntos y calidad.
 
 ## Probar localmente
 1. Abrir `index.html` directamente (doble click).

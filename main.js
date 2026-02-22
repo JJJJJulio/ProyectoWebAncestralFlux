@@ -10,15 +10,21 @@
     autoRotateSpeedRadPerSec: 0.35,
     rotateStepRad: Math.PI / 2,
     symbolContainRatio: 0.85,
+
     alphaThreshold: 80,
     sampleStep: 6,
-    maxPoints: 7000,
-    particleCount: 800,
-    particleSize: 1.5,
-    particleAttraction: 0.002,
-    particleFriction: 0.92,
-    particleNoiseStrength: 0.4,
-    particleReturnSpeed: 0.05,
+    maxPoints: 9000,
+
+    particleCount: 1200,
+    particleCountMin: 400,
+    particleCountMax: 2500,
+    particleSize: 1.35,
+    particleAttraction: 0.0019,
+    particleFriction: 0.915,
+    particleNoiseStrength: 0.33,
+    particleReturnSpeed: 0.045,
+    lowFpsThreshold: 40,
+    fpsWindow: 45,
   };
 
   const PALETTE = {
@@ -50,10 +56,38 @@
       enabled: true,
       particles: [],
       symbolPoints: [],
+      targetCount: CONFIG.particleCount,
+      qualityScale: 1,
+      fpsHistory: [],
 
       setPoints(points, width, height) {
         this.symbolPoints = points || [];
         this.reseed(width, height);
+      },
+
+      updateQuality(dt, width, height) {
+        if (dt <= 0) return;
+        const fps = 1 / dt;
+        this.fpsHistory.push(fps);
+        if (this.fpsHistory.length > CONFIG.fpsWindow) {
+          this.fpsHistory.shift();
+        }
+
+        if (this.fpsHistory.length < CONFIG.fpsWindow) return;
+
+        const avgFps = this.fpsHistory.reduce((acc, value) => acc + value, 0) / this.fpsHistory.length;
+        if (avgFps < CONFIG.lowFpsThreshold && this.qualityScale > 0.5) {
+          this.qualityScale = clamp(this.qualityScale - 0.08, 0.5, 1);
+          this.reseed(width, height);
+          this.fpsHistory.length = 0;
+          return;
+        }
+
+        if (avgFps > CONFIG.lowFpsThreshold + 12 && this.qualityScale < 1) {
+          this.qualityScale = clamp(this.qualityScale + 0.05, 0.5, 1);
+          this.reseed(width, height);
+          this.fpsHistory.length = 0;
+        }
       },
 
       reseed(width, height) {
@@ -63,53 +97,57 @@
           return;
         }
 
-        const adaptiveCount = clamp(Math.floor((width * height) / 1800), 300, 1200);
-        const desired = Math.min(CONFIG.particleCount, adaptiveCount);
-        const particles = [];
+        const adaptiveCount = clamp(Math.floor((width * height) / 1400), CONFIG.particleCountMin, CONFIG.particleCountMax);
+        const budgetCount = Math.floor(Math.min(CONFIG.particleCount, adaptiveCount) * this.qualityScale);
+        this.targetCount = clamp(budgetCount, CONFIG.particleCountMin, CONFIG.particleCountMax);
 
-        for (let i = 0; i < desired; i += 1) {
+        const particles = [];
+        for (let i = 0; i < this.targetCount; i += 1) {
           const target = points[Math.floor(Math.random() * points.length)];
           particles.push({
-            x: randRange(-width * 0.45, width * 0.45),
-            y: randRange(-height * 0.45, height * 0.45),
+            x: randRange(0, width),
+            y: randRange(0, height),
             tx: target.x,
             ty: target.y,
             vx: 0,
             vy: 0,
-            size: CONFIG.particleSize * randRange(0.85, 1.15),
+            size: CONFIG.particleSize * randRange(0.85, 1.1),
             phase: randRange(0, TAU),
-            alpha: randRange(0.35, 0.9),
+            alpha: randRange(0.28, 0.72),
           });
         }
 
         this.particles = particles;
       },
 
-      update(dt, time, targetFn) {
+      update(dt, elapsedTime, targetFn, width, height) {
         if (!this.enabled || !this.particles.length) return;
 
-        const noiseSpeed = 0.85;
+        this.updateQuality(dt, width, height);
+
+        const noiseSpeed = 0.72;
         for (let i = 0; i < this.particles.length; i += 1) {
-          const p = this.particles[i];
-          const target = targetFn(p, i);
-          p.tx = lerp(p.tx, target.x, CONFIG.particleReturnSpeed);
-          p.ty = lerp(p.ty, target.y, CONFIG.particleReturnSpeed);
+          const particle = this.particles[i];
+          const target = targetFn(i);
 
-          const dx = p.tx - p.x;
-          const dy = p.ty - p.y;
+          particle.tx = lerp(particle.tx, target.x, CONFIG.particleReturnSpeed);
+          particle.ty = lerp(particle.ty, target.y, CONFIG.particleReturnSpeed);
 
-          p.vx += dx * CONFIG.particleAttraction;
-          p.vy += dy * CONFIG.particleAttraction;
+          const dx = particle.tx - particle.x;
+          const dy = particle.ty - particle.y;
 
-          const n = time * noiseSpeed + p.phase;
-          p.vx += Math.sin(n + p.ty * 0.01) * CONFIG.particleNoiseStrength * dt;
-          p.vy += Math.cos(n + p.tx * 0.01) * CONFIG.particleNoiseStrength * dt;
+          particle.vx += dx * CONFIG.particleAttraction;
+          particle.vy += dy * CONFIG.particleAttraction;
 
-          p.vx *= CONFIG.particleFriction;
-          p.vy *= CONFIG.particleFriction;
+          const n = elapsedTime * noiseSpeed + particle.phase;
+          particle.vx += Math.sin(n + particle.ty * 0.004) * CONFIG.particleNoiseStrength * dt;
+          particle.vy += Math.cos(n + particle.tx * 0.004) * CONFIG.particleNoiseStrength * dt;
 
-          p.x += p.vx;
-          p.y += p.vy;
+          particle.vx *= CONFIG.particleFriction;
+          particle.vy *= CONFIG.particleFriction;
+
+          particle.x += particle.vx;
+          particle.y += particle.vy;
         }
       },
 
@@ -121,10 +159,10 @@
         ctx.fillStyle = color;
 
         for (let i = 0; i < this.particles.length; i += 1) {
-          const p = this.particles[i];
-          ctx.globalAlpha = p.alpha;
+          const particle = this.particles[i];
+          ctx.globalAlpha = particle.alpha;
           ctx.beginPath();
-          ctx.arc(p.x, p.y, p.size, 0, TAU);
+          ctx.arc(particle.x, particle.y, particle.size, 0, TAU);
           ctx.fill();
         }
 
@@ -163,7 +201,7 @@
     centerX: 0,
     centerY: 0,
     baseSize: 0,
-    time: randRange(0, TAU),
+    elapsedTime: randRange(0, TAU),
 
     currentIndex: 0,
     imageCache: {},
@@ -185,16 +223,22 @@
     },
 
     update(dt) {
-      this.time += dt;
+      this.elapsedTime += dt;
       if (this.autoRotateEnabled) {
         this.angleRad = normalizeAngle(this.angleRad + CONFIG.autoRotateSpeedRadPerSec * dt);
       }
 
-      const points = this.loadState === "loaded" && this.pointCloud.length ? this.pointCloud : this.fallbackPoints;
-      this.particleSystem.update(dt, this.time, (particle, idx) => {
-        const source = points[idx % points.length] || { x: 0.5, y: 0.5 };
-        return this.normalizedPointToScene(source.x, source.y);
-      });
+      const sourcePoints = this.loadState === "loaded" && this.pointCloud.length ? this.pointCloud : this.fallbackPoints;
+      this.particleSystem.update(
+        dt,
+        this.elapsedTime,
+        (index) => {
+          const source = sourcePoints[index % sourcePoints.length] || { x: 0.5, y: 0.5 };
+          return this.normalizedPointToScene(source.x, source.y);
+        },
+        this.width,
+        this.height,
+      );
     },
 
     render(ctx) {
@@ -211,7 +255,7 @@
           this.drawPointCloud(ctx, fg);
           this.drawDebugOverlay(ctx, fg);
         } else {
-          this.drawLoadedSymbol(ctx);
+          this.drawLoadedSymbol(ctx, 0.2);
         }
       } else {
         this.drawFallbackSymbol(ctx, fg);
@@ -244,26 +288,31 @@
           this.changeSymbol(-1);
           return;
         }
+
         if (event.code === "ArrowRight") {
           event.preventDefault();
           this.changeSymbol(1);
           return;
         }
+
         if (event.code === "KeyR" && event.shiftKey) {
           event.preventDefault();
           this.autoRotateEnabled = !this.autoRotateEnabled;
           return;
         }
+
         if (event.code === "KeyR") {
           event.preventDefault();
           this.angleRad = normalizeAngle(this.angleRad + CONFIG.rotateStepRad);
           return;
         }
+
         if (event.code === "KeyD") {
           event.preventDefault();
           this.debugPointsEnabled = !this.debugPointsEnabled;
           return;
         }
+
         if (event.code === "KeyP") {
           event.preventDefault();
           this.particleSystem.enabled = !this.particleSystem.enabled;
@@ -350,9 +399,14 @@
 
       for (let y = 0; y < image.height; y += step) {
         for (let x = 0; x < image.width; x += step) {
-          const idx = (y * image.width + x) * 4;
-          if (pixels[idx + 3] > CONFIG.alphaThreshold) {
-            points.push({ x: x / image.width, y: y / image.height, alpha: pixels[idx + 3] / 255 });
+          const index = (y * image.width + x) * 4;
+          const alpha = pixels[index + 3];
+          if (alpha > CONFIG.alphaThreshold) {
+            points.push({
+              x: x / image.width,
+              y: y / image.height,
+              alpha: alpha / 255,
+            });
             if (points.length >= CONFIG.maxPoints) return points;
           }
         }
@@ -380,16 +434,16 @@
     },
 
     getContainDrawMetrics() {
-      const image = this.img;
       const maxW = this.width * CONFIG.symbolContainRatio;
       const maxH = this.height * CONFIG.symbolContainRatio;
-      const scale = Math.min(maxW / image.width, maxH / image.height);
-      return { drawW: image.width * scale, drawH: image.height * scale };
+      const scale = Math.min(maxW / this.img.width, maxH / this.img.height);
+      return { drawW: this.img.width * scale, drawH: this.img.height * scale };
     },
 
     normalizedPointToScene(nx, ny) {
       let drawW;
       let drawH;
+
       if (this.loadState === "loaded" && this.img) {
         ({ drawW, drawH } = this.getContainDrawMetrics());
       } else {
@@ -408,14 +462,16 @@
       };
     },
 
-    drawLoadedSymbol(ctx) {
+    drawLoadedSymbol(ctx, alpha = 1) {
       const { drawW, drawH } = this.getContainDrawMetrics();
 
       ctx.save();
+      ctx.globalAlpha = alpha;
       ctx.translate(this.centerX, this.centerY);
       ctx.rotate(this.angleRad);
       ctx.drawImage(this.img, -drawW * 0.5, -drawH * 0.5, drawW, drawH);
       ctx.restore();
+      ctx.globalAlpha = 1;
     },
 
     drawPointCloud(ctx, fg) {
@@ -433,10 +489,10 @@
       ctx.fillStyle = fg;
 
       for (let i = 0; i < this.pointCloud.length; i += 1) {
-        const p = this.pointCloud[i];
-        const px = p.x * drawW - drawW * 0.5;
-        const py = p.y * drawH - drawH * 0.5;
-        ctx.globalAlpha = 0.35 + p.alpha * 0.65;
+        const point = this.pointCloud[i];
+        const px = point.x * drawW - drawW * 0.5;
+        const py = point.y * drawH - drawH * 0.5;
+        ctx.globalAlpha = 0.35 + point.alpha * 0.65;
         ctx.beginPath();
         ctx.arc(px, py, radius, 0, TAU);
         ctx.fill();
@@ -454,11 +510,12 @@
       ctx.textBaseline = "top";
       ctx.fillText(`debug points: ${this.pointCloud.length}`, 12, 12);
       ctx.fillText(`particles: ${this.particleSystem.particles.length}`, 12, 28);
+      ctx.fillText(`quality: ${(this.particleSystem.qualityScale * 100).toFixed(0)}%`, 12, 44);
       ctx.restore();
     },
 
     drawFallbackSymbol(ctx, fg) {
-      const breath = 0.5 + 0.5 * Math.sin(this.time * 1.2);
+      const breath = 0.5 + 0.5 * Math.sin(this.elapsedTime * 1.2);
       const alpha = lerp(0.4, 0.9, breath);
       const step = this.baseSize * 0.2;
       const arm = this.baseSize * 0.8;
@@ -483,6 +540,7 @@
       ctx.globalAlpha = 0.08;
       ctx.strokeStyle = fg;
       ctx.lineWidth = 1;
+
       const gridStep = Math.max(24, Math.floor(this.baseSize * 0.24));
       for (let x = 0; x <= this.width; x += gridStep) {
         ctx.beginPath();
@@ -490,12 +548,14 @@
         ctx.lineTo(x, this.height);
         ctx.stroke();
       }
+
       for (let y = 0; y <= this.height; y += gridStep) {
         ctx.beginPath();
         ctx.moveTo(0, y);
         ctx.lineTo(this.width, y);
         ctx.stroke();
       }
+
       ctx.restore();
     },
   };
@@ -534,9 +594,11 @@
 
     loop: (timestampMs) => {
       if (!Engine.lastTimeMs) Engine.lastTimeMs = timestampMs;
+
       const rawDt = (timestampMs - Engine.lastTimeMs) * 0.001;
       const dt = clamp(rawDt, 0, CONFIG.dtClamp);
       Engine.lastTimeMs = timestampMs;
+
       Engine.update(dt);
       Engine.render();
       Engine.rafId = window.requestAnimationFrame(Engine.loop);
@@ -552,7 +614,11 @@
 
     start() {
       this.initCanvas();
-      SceneManager.setScene(MainScene, { width: this.width, height: this.height, dpr: this.dpr });
+      SceneManager.setScene(MainScene, {
+        width: this.width,
+        height: this.height,
+        dpr: this.dpr,
+      });
       this.rafId = window.requestAnimationFrame(this.loop);
     },
 
