@@ -13,18 +13,29 @@
 
     alphaThreshold: 80,
     sampleStep: 6,
+    sampleStepMax: 12,
     maxPoints: 9000,
 
     particleCount: 1200,
     particleCountMin: 400,
     particleCountMax: 2500,
+    particleCountStep: 80,
     particleSize: 1.35,
+
     particleAttraction: 0.0019,
     particleFriction: 0.915,
     particleNoiseStrength: 0.33,
     particleReturnSpeed: 0.045,
+    particleMaxSpeed: 2.4,
+    particleMaxAccel: 0.16,
+    particleMaxOffsetPx: 42,
+
+    dualityPeriodSec: 14,
+
     lowFpsThreshold: 40,
+    highFpsThreshold: 52,
     fpsWindow: 45,
+    qualityCooldownSec: 1.2,
   };
 
   const PALETTE = {
@@ -56,41 +67,13 @@
       enabled: true,
       particles: [],
       symbolPoints: [],
-      targetCount: CONFIG.particleCount,
-      qualityScale: 1,
-      fpsHistory: [],
 
-      setPoints(points, width, height) {
+      setPoints(points, width, height, desiredCount) {
         this.symbolPoints = points || [];
-        this.reseed(width, height);
+        this.reseed(width, height, desiredCount);
       },
 
-      updateQuality(dt, width, height) {
-        if (dt <= 0) return;
-        const fps = 1 / dt;
-        this.fpsHistory.push(fps);
-        if (this.fpsHistory.length > CONFIG.fpsWindow) {
-          this.fpsHistory.shift();
-        }
-
-        if (this.fpsHistory.length < CONFIG.fpsWindow) return;
-
-        const avgFps = this.fpsHistory.reduce((acc, value) => acc + value, 0) / this.fpsHistory.length;
-        if (avgFps < CONFIG.lowFpsThreshold && this.qualityScale > 0.5) {
-          this.qualityScale = clamp(this.qualityScale - 0.08, 0.5, 1);
-          this.reseed(width, height);
-          this.fpsHistory.length = 0;
-          return;
-        }
-
-        if (avgFps > CONFIG.lowFpsThreshold + 12 && this.qualityScale < 1) {
-          this.qualityScale = clamp(this.qualityScale + 0.05, 0.5, 1);
-          this.reseed(width, height);
-          this.fpsHistory.length = 0;
-        }
-      },
-
-      reseed(width, height) {
+      reseed(width, height, desiredCount) {
         const points = this.symbolPoints;
         if (!points.length) {
           this.particles = [];
@@ -98,11 +81,10 @@
         }
 
         const adaptiveCount = clamp(Math.floor((width * height) / 1400), CONFIG.particleCountMin, CONFIG.particleCountMax);
-        const budgetCount = Math.floor(Math.min(CONFIG.particleCount, adaptiveCount) * this.qualityScale);
-        this.targetCount = clamp(budgetCount, CONFIG.particleCountMin, CONFIG.particleCountMax);
+        const count = clamp(Math.min(desiredCount, adaptiveCount), CONFIG.particleCountMin, CONFIG.particleCountMax);
 
         const particles = [];
-        for (let i = 0; i < this.targetCount; i += 1) {
+        for (let i = 0; i < count; i += 1) {
           const target = points[Math.floor(Math.random() * points.length)];
           particles.push({
             x: randRange(0, width),
@@ -120,10 +102,8 @@
         this.particles = particles;
       },
 
-      update(dt, elapsedTime, targetFn, width, height) {
+      update(dt, elapsedTime, targetFn, dynamics) {
         if (!this.enabled || !this.particles.length) return;
-
-        this.updateQuality(dt, width, height);
 
         const noiseSpeed = 0.72;
         for (let i = 0; i < this.particles.length; i += 1) {
@@ -136,18 +116,41 @@
           const dx = particle.tx - particle.x;
           const dy = particle.ty - particle.y;
 
-          particle.vx += dx * CONFIG.particleAttraction;
-          particle.vy += dy * CONFIG.particleAttraction;
-
           const n = elapsedTime * noiseSpeed + particle.phase;
-          particle.vx += Math.sin(n + particle.ty * 0.004) * CONFIG.particleNoiseStrength * dt;
-          particle.vy += Math.cos(n + particle.tx * 0.004) * CONFIG.particleNoiseStrength * dt;
+          const noiseX = Math.sin(n + particle.ty * 0.004) * dynamics.noise * dt;
+          const noiseY = Math.cos(n + particle.tx * 0.004) * dynamics.noise * dt;
 
-          particle.vx *= CONFIG.particleFriction;
-          particle.vy *= CONFIG.particleFriction;
+          let ax = dx * dynamics.attraction + noiseX;
+          let ay = dy * dynamics.attraction + noiseY;
+
+          const accelMag = Math.hypot(ax, ay);
+          if (accelMag > CONFIG.particleMaxAccel) {
+            const scale = CONFIG.particleMaxAccel / accelMag;
+            ax *= scale;
+            ay *= scale;
+          }
+
+          particle.vx += ax;
+          particle.vy += ay;
+
+          particle.vx *= dynamics.friction;
+          particle.vy *= dynamics.friction;
+
+          const speed = Math.hypot(particle.vx, particle.vy);
+          if (speed > CONFIG.particleMaxSpeed) {
+            const scale = CONFIG.particleMaxSpeed / speed;
+            particle.vx *= scale;
+            particle.vy *= scale;
+          }
 
           particle.x += particle.vx;
           particle.y += particle.vy;
+
+          const dist = Math.hypot(dx, dy);
+          if (dist > CONFIG.particleMaxOffsetPx) {
+            particle.x = lerp(particle.x, particle.tx, 0.07);
+            particle.y = lerp(particle.y, particle.ty, 0.07);
+          }
         }
       },
 
@@ -215,6 +218,13 @@
     fallbackPoints: [],
     particleSystem: createParticleSystem(),
 
+    adaptiveState: {
+      fpsHistory: [],
+      particleBudget: CONFIG.particleCount,
+      sampleStep: CONFIG.sampleStep,
+      lastQualityChangeSec: 0,
+    },
+
     init({ width, height, dpr }) {
       this.resize(width, height, dpr);
       this.bindControls();
@@ -228,16 +238,25 @@
         this.angleRad = normalizeAngle(this.angleRad + CONFIG.autoRotateSpeedRadPerSec * dt);
       }
 
-      const sourcePoints = this.loadState === "loaded" && this.pointCloud.length ? this.pointCloud : this.fallbackPoints;
+      this.updateAdaptiveQuality(dt);
+
+      const duality01 = this.getDualityPhase01();
+      const dynamics = {
+        attraction: lerp(CONFIG.particleAttraction * 1.18, CONFIG.particleAttraction * 0.86, duality01),
+        noise: lerp(CONFIG.particleNoiseStrength * 0.55, CONFIG.particleNoiseStrength * 1.25, duality01),
+        friction: lerp(Math.min(0.97, CONFIG.particleFriction + 0.03), Math.max(0.82, CONFIG.particleFriction - 0.03), duality01),
+      };
+
+      const hasMask = this.loadState === "loaded" && this.pointCloud.length;
+      const sourcePoints = hasMask ? this.pointCloud : this.fallbackPoints;
       this.particleSystem.update(
         dt,
         this.elapsedTime,
         (index) => {
-          const source = sourcePoints[index % sourcePoints.length] || { x: 0.5, y: 0.5 };
-          return this.normalizedPointToScene(source.x, source.y);
+          const source = sourcePoints[index % sourcePoints.length] || (hasMask ? { lx: 0, ly: 0 } : { x: 0.5, y: 0.5 });
+          return hasMask ? this.maskPointToScene(source.lx, source.ly) : this.normalizedPointToScene(source.x, source.y);
         },
-        this.width,
-        this.height,
+        dynamics,
       );
     },
 
@@ -273,8 +292,7 @@
       this.baseSize = Math.min(width, height) * 0.22;
       this.fallbackPoints = this.buildFallbackPoints();
 
-      const sourcePoints = this.loadState === "loaded" && this.pointCloud.length ? this.pointCloud : this.fallbackPoints;
-      this.particleSystem.setPoints(sourcePoints, width, height);
+      this.applyCurrentQuality(true);
     },
 
     destroy() {
@@ -322,13 +340,70 @@
       window.addEventListener("keydown", this.onKeyDown);
     },
 
+    getDualityPhase01() {
+      const rate = TAU / Math.max(10, CONFIG.dualityPeriodSec);
+      return (Math.sin(this.elapsedTime * rate) + 1) * 0.5;
+    },
+
+    updateAdaptiveQuality(dt) {
+      if (dt <= 0) return;
+
+      const state = this.adaptiveState;
+      state.fpsHistory.push(1 / dt);
+      if (state.fpsHistory.length > CONFIG.fpsWindow) state.fpsHistory.shift();
+      if (state.fpsHistory.length < CONFIG.fpsWindow) return;
+
+      const avgFps = state.fpsHistory.reduce((acc, value) => acc + value, 0) / state.fpsHistory.length;
+      const sinceLastChange = this.elapsedTime - state.lastQualityChangeSec;
+      if (sinceLastChange < CONFIG.qualityCooldownSec) return;
+
+      let changed = false;
+
+      if (avgFps < CONFIG.lowFpsThreshold) {
+        if (state.particleBudget > CONFIG.particleCountMin) {
+          state.particleBudget = Math.max(CONFIG.particleCountMin, state.particleBudget - CONFIG.particleCountStep);
+          changed = true;
+        } else if (state.sampleStep < CONFIG.sampleStepMax) {
+          state.sampleStep += 1;
+          changed = true;
+        }
+      } else if (avgFps > CONFIG.highFpsThreshold) {
+        if (state.sampleStep > CONFIG.sampleStep) {
+          state.sampleStep -= 1;
+          changed = true;
+        } else if (state.particleBudget < CONFIG.particleCount) {
+          state.particleBudget = Math.min(CONFIG.particleCount, state.particleBudget + CONFIG.particleCountStep);
+          changed = true;
+        }
+      }
+
+      if (changed) {
+        state.lastQualityChangeSec = this.elapsedTime;
+        state.fpsHistory.length = 0;
+        this.applyCurrentQuality(true);
+      }
+    },
+
+    applyCurrentQuality(reseedParticles) {
+      const state = this.adaptiveState;
+
+      if (this.loadState === "loaded" && this.img) {
+        this.pointCloud = this.sampleMaskPointsOffscreen(this.img, state.sampleStep);
+      }
+
+      const sourcePoints = this.loadState === "loaded" && this.pointCloud.length ? this.pointCloud : this.fallbackPoints;
+      if (reseedParticles) {
+        this.particleSystem.setPoints(sourcePoints, this.width, this.height, state.particleBudget);
+      }
+    },
+
     changeSymbol(direction) {
       const count = SYMBOLS.length;
       if (count === 0) {
         this.loadState = "failed";
         this.img = null;
         this.pointCloud = [];
-        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height);
+        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height, this.adaptiveState.particleBudget);
         return;
       }
 
@@ -342,7 +417,7 @@
         this.loadState = "failed";
         this.img = null;
         this.pointCloud = [];
-        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height);
+        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height, this.adaptiveState.particleBudget);
         return;
       }
 
@@ -350,8 +425,8 @@
       if (cached && cached.status === "loaded") {
         this.img = cached.img;
         this.loadState = "loaded";
-        this.pointCloud = cached.pointCloud || [];
-        this.particleSystem.setPoints(this.pointCloud, this.width, this.height);
+        this.pointCloud = this.sampleMaskPointsOffscreen(cached.img, this.adaptiveState.sampleStep);
+        this.particleSystem.setPoints(this.pointCloud, this.width, this.height, this.adaptiveState.particleBudget);
         return;
       }
 
@@ -361,20 +436,19 @@
 
       const image = new Image();
       image.onload = () => {
-        const pointCloud = this.buildPointCloudFromImage(image);
-        this.imageCache[name] = { img: image, status: "loaded", pointCloud };
+        this.imageCache[name] = { img: image, status: "loaded" };
         this.img = image;
-        this.pointCloud = pointCloud;
         this.loadState = "loaded";
-        this.particleSystem.setPoints(this.pointCloud, this.width, this.height);
+        this.pointCloud = this.sampleMaskPointsOffscreen(image, this.adaptiveState.sampleStep);
+        this.particleSystem.setPoints(this.pointCloud, this.width, this.height, this.adaptiveState.particleBudget);
       };
 
       image.onerror = () => {
-        this.imageCache[name] = { img: null, status: "failed", pointCloud: [] };
+        this.imageCache[name] = { img: null, status: "failed" };
         this.img = null;
         this.pointCloud = [];
         this.loadState = "failed";
-        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height);
+        this.particleSystem.setPoints(this.fallbackPoints, this.width, this.height, this.adaptiveState.particleBudget);
         if (CONFIG.debug) {
           console.info(`No se pudo cargar ${SYMBOLS_BASE_PATH}${name}; se activa fallback demo.`);
         }
@@ -383,19 +457,24 @@
       image.src = `${SYMBOLS_BASE_PATH}${name}`;
     },
 
-    buildPointCloudFromImage(image) {
+    sampleMaskPointsOffscreen(image, stepOverride = CONFIG.sampleStep) {
       const offscreen = document.createElement("canvas");
       offscreen.width = image.width;
       offscreen.height = image.height;
+
       const offCtx = offscreen.getContext("2d", { willReadFrequently: true });
       if (!offCtx) return [];
 
+      // Muestreo puro de máscara: sin transforms de escena.
+      offCtx.setTransform(1, 0, 0, 1, 0, 0);
       offCtx.clearRect(0, 0, image.width, image.height);
-      offCtx.drawImage(image, 0, 0);
+      offCtx.drawImage(image, 0, 0, image.width, image.height);
 
       const pixels = offCtx.getImageData(0, 0, image.width, image.height).data;
       const points = [];
-      const step = Math.max(1, Math.floor(CONFIG.sampleStep));
+      const step = Math.max(1, Math.floor(stepOverride));
+      const halfW = image.width * 0.5;
+      const halfH = image.height * 0.5;
 
       for (let y = 0; y < image.height; y += step) {
         for (let x = 0; x < image.width; x += step) {
@@ -403,8 +482,8 @@
           const alpha = pixels[index + 3];
           if (alpha > CONFIG.alphaThreshold) {
             points.push({
-              x: x / image.width,
-              y: y / image.height,
+              lx: x - halfW,
+              ly: y - halfH,
               alpha: alpha / 255,
             });
             if (points.length >= CONFIG.maxPoints) return points;
@@ -438,6 +517,27 @@
       const maxH = this.height * CONFIG.symbolContainRatio;
       const scale = Math.min(maxW / this.img.width, maxH / this.img.height);
       return { drawW: this.img.width * scale, drawH: this.img.height * scale };
+    },
+
+    maskPointToScene(localX, localY) {
+      if (!(this.loadState === "loaded" && this.img)) {
+        return { x: this.centerX, y: this.centerY };
+      }
+
+      const { drawW, drawH } = this.getContainDrawMetrics();
+      const scaleX = drawW / this.img.width;
+      const scaleY = drawH / this.img.height;
+
+      const px = localX * scaleX;
+      const py = localY * scaleY;
+
+      const cos = Math.cos(this.angleRad);
+      const sin = Math.sin(this.angleRad);
+
+      return {
+        x: this.centerX + px * cos - py * sin,
+        y: this.centerY + px * sin + py * cos,
+      };
     },
 
     normalizedPointToScene(nx, ny) {
@@ -490,8 +590,8 @@
 
       for (let i = 0; i < this.pointCloud.length; i += 1) {
         const point = this.pointCloud[i];
-        const px = point.x * drawW - drawW * 0.5;
-        const py = point.y * drawH - drawH * 0.5;
+        const px = (point.lx / (this.img.width * 0.5)) * (drawW * 0.5);
+        const py = (point.ly / (this.img.height * 0.5)) * (drawH * 0.5);
         ctx.globalAlpha = 0.35 + point.alpha * 0.65;
         ctx.beginPath();
         ctx.arc(px, py, radius, 0, TAU);
@@ -510,7 +610,7 @@
       ctx.textBaseline = "top";
       ctx.fillText(`debug points: ${this.pointCloud.length}`, 12, 12);
       ctx.fillText(`particles: ${this.particleSystem.particles.length}`, 12, 28);
-      ctx.fillText(`quality: ${(this.particleSystem.qualityScale * 100).toFixed(0)}%`, 12, 44);
+      ctx.fillText(`quality: count=${this.adaptiveState.particleBudget} step=${this.adaptiveState.sampleStep}`, 12, 44);
       ctx.restore();
     },
 
