@@ -14,7 +14,6 @@ Experiencia web generativa basada en Canvas 2D, orientada a iteración visual m�
 - `ArrowRight`: símbolo siguiente.
 - `R`: rotación por paso de 90°.
 - `Shift + R`: activar/desactivar rotación suave automática.
-- `D`: toggle debug de nube de puntos (máscara alpha).
 
 ## Probar localmente
 1. Abrir `index.html` directamente (doble click).
@@ -27,3 +26,8 @@ Experiencia web generativa basada en Canvas 2D, orientada a iteración visual m�
 1. Renombrar temporalmente `./assets/symbols/symbol-01.png`.
 2. Recargar `index.html`.
 3. Debe mostrarse un fallback geométrico minimalista centrado, sin errores en consola.
+
+
+## Sistema de partículas sobre símbolo
+- `P`: activar/desactivar partículas dinámicas sobre la máscara alpha del símbolo.
+- Las partículas migran suavemente cuando rota el símbolo y respetan fallback si la imagen falla.
