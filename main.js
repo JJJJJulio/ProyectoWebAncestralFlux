@@ -10,6 +10,9 @@
     autoRotateSpeedRadPerSec: 0.35,
     rotateStepRad: Math.PI / 2,
     symbolContainRatio: 0.85,
+    alphaThreshold: 80,
+    sampleStep: 6,
+    maxPoints: 7000,
   };
 
   const PALETTE = {
@@ -85,6 +88,10 @@
     angleRad: 0,
     autoRotateEnabled: false,
 
+    // Bloque 3: nube de puntos desde máscara alpha.
+    debugPointsEnabled: false,
+    pointCloud: [],
+
     init({ width, height, dpr }) {
       this.resize(width, height, dpr);
       this.bindControls();
@@ -105,11 +112,15 @@
 
       ctx.fillStyle = bg;
       ctx.fillRect(0, 0, this.width, this.height);
-
       this.drawSubtleGrid(ctx, fg);
 
       if (this.loadState === "loaded" && this.img) {
-        this.drawLoadedSymbol(ctx);
+        if (this.debugPointsEnabled) {
+          this.drawPointCloud(ctx, fg);
+          this.drawDebugOverlay(ctx, fg);
+        } else {
+          this.drawLoadedSymbol(ctx);
+        }
       } else {
         this.drawFallbackSymbol(ctx, fg);
       }
@@ -153,6 +164,12 @@
         if (event.code === "KeyR") {
           event.preventDefault();
           this.angleRad = normalizeAngle(this.angleRad + CONFIG.rotateStepRad);
+          return;
+        }
+
+        if (event.code === "KeyD") {
+          event.preventDefault();
+          this.debugPointsEnabled = !this.debugPointsEnabled;
         }
       };
 
@@ -164,6 +181,7 @@
       if (count === 0) {
         this.loadState = "failed";
         this.img = null;
+        this.pointCloud = [];
         return;
       }
 
@@ -176,6 +194,7 @@
       if (!name) {
         this.loadState = "failed";
         this.img = null;
+        this.pointCloud = [];
         return;
       }
 
@@ -183,23 +202,27 @@
       if (cached && cached.status === "loaded") {
         this.img = cached.img;
         this.loadState = "loaded";
+        this.pointCloud = cached.pointCloud || [];
         return;
       }
 
-      // Si falló antes, se reintenta la carga al navegar/recargar escena.
       this.loadState = "loading";
       this.img = null;
+      this.pointCloud = [];
 
       const image = new Image();
       image.onload = () => {
-        this.imageCache[name] = { img: image, status: "loaded" };
+        const pointCloud = this.buildPointCloudFromImage(image);
+        this.imageCache[name] = { img: image, status: "loaded", pointCloud };
         this.img = image;
+        this.pointCloud = pointCloud;
         this.loadState = "loaded";
       };
 
       image.onerror = () => {
-        this.imageCache[name] = { img: null, status: "failed" };
+        this.imageCache[name] = { img: null, status: "failed", pointCloud: [] };
         this.img = null;
+        this.pointCloud = [];
         this.loadState = "failed";
         if (CONFIG.debug) {
           console.info(`No se pudo cargar ${SYMBOLS_BASE_PATH}${name}; se activa fallback demo.`);
@@ -207,6 +230,43 @@
       };
 
       image.src = `${SYMBOLS_BASE_PATH}${name}`;
+    },
+
+    buildPointCloudFromImage(image) {
+      const offscreen = document.createElement("canvas");
+      offscreen.width = image.width;
+      offscreen.height = image.height;
+      const offCtx = offscreen.getContext("2d", { willReadFrequently: true });
+
+      if (!offCtx) {
+        return [];
+      }
+
+      offCtx.clearRect(0, 0, image.width, image.height);
+      offCtx.drawImage(image, 0, 0);
+
+      const pixels = offCtx.getImageData(0, 0, image.width, image.height).data;
+      const points = [];
+      const step = Math.max(1, Math.floor(CONFIG.sampleStep));
+
+      for (let y = 0; y < image.height; y += step) {
+        for (let x = 0; x < image.width; x += step) {
+          const index = (y * image.width + x) * 4;
+          const alpha = pixels[index + 3];
+          if (alpha > CONFIG.alphaThreshold) {
+            points.push({
+              x: x / image.width,
+              y: y / image.height,
+              alpha: alpha / 255,
+            });
+            if (points.length >= CONFIG.maxPoints) {
+              return points;
+            }
+          }
+        }
+      }
+
+      return points;
     },
 
     drawLoadedSymbol(ctx) {
@@ -222,6 +282,51 @@
       ctx.translate(this.centerX, this.centerY);
       ctx.rotate(this.angleRad);
       ctx.drawImage(image, -drawW * 0.5, -drawH * 0.5, drawW, drawH);
+      ctx.restore();
+    },
+
+    drawPointCloud(ctx, fg) {
+      if (!this.img || this.pointCloud.length === 0) {
+        this.drawFallbackSymbol(ctx, fg);
+        return;
+      }
+
+      const image = this.img;
+      const maxW = this.width * CONFIG.symbolContainRatio;
+      const maxH = this.height * CONFIG.symbolContainRatio;
+      const scale = Math.min(maxW / image.width, maxH / image.height);
+
+      const drawW = image.width * scale;
+      const drawH = image.height * scale;
+      const pointRadius = this.dpr > 1.5 ? 0.95 : 1.2;
+
+      ctx.save();
+      ctx.translate(this.centerX, this.centerY);
+      ctx.rotate(this.angleRad);
+      ctx.fillStyle = fg;
+
+      for (let i = 0; i < this.pointCloud.length; i += 1) {
+        const point = this.pointCloud[i];
+        const px = point.x * drawW - drawW * 0.5;
+        const py = point.y * drawH - drawH * 0.5;
+
+        ctx.globalAlpha = 0.4 + point.alpha * 0.6;
+        ctx.beginPath();
+        ctx.arc(px, py, pointRadius, 0, TAU);
+        ctx.fill();
+      }
+
+      ctx.restore();
+      ctx.globalAlpha = 1;
+    },
+
+    drawDebugOverlay(ctx, fg) {
+      ctx.save();
+      ctx.globalAlpha = 0.9;
+      ctx.fillStyle = fg;
+      ctx.font = "12px ui-monospace, SFMono-Regular, Menlo, monospace";
+      ctx.textBaseline = "top";
+      ctx.fillText(`debug points: ${this.pointCloud.length}`, 12, 12);
       ctx.restore();
     },
 
