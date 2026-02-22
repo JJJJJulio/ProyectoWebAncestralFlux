@@ -1,102 +1,247 @@
 (() => {
   "use strict";
 
-  // --- DOM references ------------------------------------------------------
-  const canvas = document.getElementById("scene");
-  const ctx = canvas.getContext("2d");
+  const CONFIG = {
+    debug: false,
+    dtClamp: 0.05,
+    resizeDebounceMs: 150,
+  };
 
-  if (!ctx) {
-    console.error("No se pudo inicializar el contexto 2D del canvas.");
-    return;
+  const PALETTE = {
+    dayBg: "#f4f5f8",
+    dayFg: "#1d2233",
+    nightBg: "#090b12",
+    nightFg: "#d4daf5",
+  };
+
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const randRange = (min, max) => min + Math.random() * (max - min);
+
+  function debounce(fn, waitMs) {
+    let timeoutId = null;
+    return (...args) => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      timeoutId = setTimeout(() => fn(...args), waitMs);
+    };
   }
 
-  // --- Rendering configuration --------------------------------------------
-  const state = {
+  const SceneManager = {
+    currentScene: null,
+
+    setScene(scene, context) {
+      if (this.currentScene && this.currentScene.destroy) {
+        this.currentScene.destroy();
+      }
+      this.currentScene = scene;
+      if (this.currentScene && this.currentScene.init) {
+        this.currentScene.init(context);
+      }
+    },
+
+    update(dt) {
+      if (this.currentScene && this.currentScene.update) {
+        this.currentScene.update(dt);
+      }
+    },
+
+    render(ctx) {
+      if (this.currentScene && this.currentScene.render) {
+        this.currentScene.render(ctx);
+      }
+    },
+
+    resize(width, height, dpr) {
+      if (this.currentScene && this.currentScene.resize) {
+        this.currentScene.resize(width, height, dpr);
+      }
+    },
+  };
+
+  const MainScene = {
     width: 0,
     height: 0,
     dpr: 1,
+    time: randRange(0, Math.PI * 2),
     centerX: 0,
     centerY: 0,
     baseSize: 0,
-    startTime: performance.now(),
+
+    init({ width, height, dpr }) {
+      this.resize(width, height, dpr);
+    },
+
+    update(dt) {
+      this.time += dt;
+    },
+
+    render(ctx) {
+      const isDay = document.body.classList.contains("theme-day");
+      const bg = isDay ? PALETTE.dayBg : PALETTE.nightBg;
+      const fg = isDay ? PALETTE.dayFg : PALETTE.nightFg;
+
+      ctx.fillStyle = bg;
+      ctx.fillRect(0, 0, this.width, this.height);
+
+      const breath = 0.5 + 0.5 * Math.sin(this.time * 1.4);
+      const glowAlpha = lerp(0.15, 0.38, breath);
+      const strokeAlpha = lerp(0.45, 0.9, breath);
+      const crossExtent = this.baseSize * lerp(0.9, 1.05, breath);
+
+      ctx.save();
+      ctx.translate(this.centerX, this.centerY);
+
+      // Sutil retícula para validar nitidez y escalado
+      ctx.globalAlpha = 0.08;
+      ctx.strokeStyle = fg;
+      ctx.lineWidth = 1;
+      const gridStep = Math.max(24, Math.floor(this.baseSize * 0.22));
+      for (let x = -this.centerX; x <= this.centerX; x += gridStep) {
+        ctx.beginPath();
+        ctx.moveTo(x, -this.centerY);
+        ctx.lineTo(x, this.centerY);
+        ctx.stroke();
+      }
+      for (let y = -this.centerY; y <= this.centerY; y += gridStep) {
+        ctx.beginPath();
+        ctx.moveTo(-this.centerX, y);
+        ctx.lineTo(this.centerX, y);
+        ctx.stroke();
+      }
+
+      // Halo
+      ctx.globalAlpha = glowAlpha;
+      ctx.strokeStyle = fg;
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.arc(0, 0, this.baseSize * 0.95, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // Cruz geométrica
+      ctx.globalAlpha = strokeAlpha;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(-crossExtent, 0);
+      ctx.lineTo(crossExtent, 0);
+      ctx.moveTo(0, -crossExtent);
+      ctx.lineTo(0, crossExtent);
+      ctx.stroke();
+
+      // Marco interno simple
+      ctx.globalAlpha = strokeAlpha * 0.85;
+      const square = this.baseSize * 0.45;
+      ctx.strokeRect(-square, -square, square * 2, square * 2);
+
+      ctx.restore();
+    },
+
+    resize(width, height, dpr) {
+      this.width = width;
+      this.height = height;
+      this.dpr = dpr;
+      this.centerX = width * 0.5;
+      this.centerY = height * 0.5;
+      this.baseSize = Math.min(width, height) * 0.18;
+    },
+
+    destroy() {},
   };
 
-  function resizeCanvas() {
-    state.dpr = Math.min(window.devicePixelRatio || 1, 2);
-    state.width = window.innerWidth;
-    state.height = window.innerHeight;
+  const Engine = {
+    canvas: null,
+    ctx: null,
+    width: 0,
+    height: 0,
+    dpr: 1,
+    rafId: 0,
+    lastTimeMs: 0,
 
-    canvas.width = Math.floor(state.width * state.dpr);
-    canvas.height = Math.floor(state.height * state.dpr);
+    initCanvas() {
+      this.canvas = document.getElementById("c");
+      if (!this.canvas) {
+        throw new Error("No se encontró <canvas id='c'> en el documento.");
+      }
 
-    ctx.setTransform(state.dpr, 0, 0, state.dpr, 0, 0);
+      this.ctx = this.canvas.getContext("2d");
+      if (!this.ctx) {
+        throw new Error("No se pudo crear el contexto 2D del canvas.");
+      }
 
-    state.centerX = state.width * 0.5;
-    state.centerY = state.height * 0.5;
-    state.baseSize = Math.min(state.width, state.height) * 0.14;
+      this.resize();
+      const debouncedResize = debounce(() => this.resize(), CONFIG.resizeDebounceMs);
+      window.addEventListener("resize", debouncedResize);
+      this._onResize = debouncedResize;
+    },
+
+    resize() {
+      this.width = window.innerWidth;
+      this.height = window.innerHeight;
+      this.dpr = Math.max(1, window.devicePixelRatio || 1);
+
+      this.canvas.width = Math.floor(this.width * this.dpr);
+      this.canvas.height = Math.floor(this.height * this.dpr);
+
+      this.ctx.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      SceneManager.resize(this.width, this.height, this.dpr);
+    },
+
+    loop: (timestampMs) => {
+      if (!Engine.lastTimeMs) {
+        Engine.lastTimeMs = timestampMs;
+      }
+
+      const rawDt = (timestampMs - Engine.lastTimeMs) * 0.001;
+      const dt = clamp(rawDt, 0, CONFIG.dtClamp);
+      Engine.lastTimeMs = timestampMs;
+
+      Engine.update(dt);
+      Engine.render();
+
+      Engine.rafId = window.requestAnimationFrame(Engine.loop);
+    },
+
+    update(dt) {
+      SceneManager.update(dt);
+    },
+
+    render() {
+      SceneManager.render(this.ctx);
+    },
+
+    start() {
+      this.initCanvas();
+      SceneManager.setScene(MainScene, {
+        width: this.width,
+        height: this.height,
+        dpr: this.dpr,
+      });
+      this.rafId = window.requestAnimationFrame(this.loop);
+    },
+
+    destroy() {
+      if (this.rafId) {
+        window.cancelAnimationFrame(this.rafId);
+      }
+      if (this._onResize) {
+        window.removeEventListener("resize", this._onResize);
+      }
+      if (SceneManager.currentScene && SceneManager.currentScene.destroy) {
+        SceneManager.currentScene.destroy();
+      }
+    },
+  };
+
+  try {
+    Engine.start();
+  } catch (error) {
+    console.error("Error al iniciar el motor visual:", error);
   }
 
-  // Placeholder: símbolo geométrico ritual abstracto (círculo + rombo + cruz)
-  function drawSymbol(time) {
-    const pulse = 1 + Math.sin(time * 0.0018) * 0.05;
-    const glow = 0.35 + Math.sin(time * 0.0021) * 0.15;
-
-    const size = state.baseSize * pulse;
-
-    ctx.save();
-    ctx.translate(state.centerX, state.centerY);
-
-    // Halo exterior
-    ctx.globalAlpha = 0.2 + glow;
-    ctx.strokeStyle = "#d8ddff";
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.arc(0, 0, size * 1.15, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Círculo central
-    ctx.globalAlpha = 0.9;
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.arc(0, 0, size * 0.75, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // Rombo interno
-    ctx.globalAlpha = 0.78;
-    ctx.beginPath();
-    ctx.moveTo(0, -size * 0.55);
-    ctx.lineTo(size * 0.55, 0);
-    ctx.lineTo(0, size * 0.55);
-    ctx.lineTo(-size * 0.55, 0);
-    ctx.closePath();
-    ctx.stroke();
-
-    // Cruz axial
-    ctx.globalAlpha = 0.62;
-    ctx.beginPath();
-    ctx.moveTo(-size * 0.9, 0);
-    ctx.lineTo(size * 0.9, 0);
-    ctx.moveTo(0, -size * 0.9);
-    ctx.lineTo(0, size * 0.9);
-    ctx.stroke();
-
-    ctx.restore();
+  if (CONFIG.debug) {
+    window.__engine = Engine;
+    window.__utils = { clamp, lerp, randRange, debounce };
+    console.info("Debug activo: referencias expuestas en window.__engine / window.__utils");
   }
-
-  function renderFrame(now) {
-    const elapsed = now - state.startTime;
-
-    ctx.clearRect(0, 0, state.width, state.height);
-
-    drawSymbol(elapsed);
-    requestAnimationFrame(renderFrame);
-  }
-
-  function init() {
-    resizeCanvas();
-    window.addEventListener("resize", resizeCanvas);
-    requestAnimationFrame(renderFrame);
-  }
-
-  init();
 })();
