@@ -1,0 +1,38 @@
+:root {
+  color-scheme: dark;
+  --bg-day: #f4f5f8;
+  --fg-day: #1d2233;
+  --bg-night: #090b12;
+  --fg-night: #d4daf5;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  overflow: hidden;
+  background: var(--bg-night);
+}
+
+body.theme-day {
+  background: var(--bg-day);
+}
+
+body.theme-night {
+  background: var(--bg-night);
+}
+
+#c {
+  display: block;
+  width: 100vw;
+  height: 100vh;
+  margin: 0 auto;
+}
